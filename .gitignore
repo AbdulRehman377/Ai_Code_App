@@ -1,14 +1,18 @@
-# Environment
+# Environment variables
 .env
 .env.local
 .env.*.local
+.env.production
+.env.development
 
-# Python
+# Python bytecode
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
+
+# Distribution / packaging
 build/
 develop-eggs/
 dist/
@@ -24,6 +28,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+MANIFEST
 
 # Virtual environments
 .venv/
@@ -31,20 +36,31 @@ venv/
 env/
 ENV/
 new_env/
+.virtualenv/
 
-# IDE
+# IDE / Editor
 .idea/
 .vscode/
 *.swp
 *.swo
 *~
+*.sublime-project
+*.sublime-workspace
+.spyderproject
+.spyproject
 
 # Streamlit
 .streamlit/
 
-# OS
+# OS generated files
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
+desktop.ini
 
 # Testing
 .pytest_cache/
@@ -52,14 +68,60 @@ Thumbs.db
 htmlcov/
 .tox/
 .nox/
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
 
-# mypy
+# Type checking
 .mypy_cache/
 .dmypy.json
 dmypy.json
+.pytype/
 
-# Jupyter
+# Jupyter Notebook
 .ipynb_checkpoints/
+*.ipynb_checkpoints
 
-# Sandbox Preview
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Sandbox / Preview
 .preview_registry.json
+sandbox_temp/
+preview_temp/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# Package manager locks (optional - uncomment if you don't want to track)
+# package-lock.json
+# yarn.lock
+# Pipfile.lock
+
+# Build artifacts
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.manifest
+*.spec
+
+# Documentation builds
+docs/_build/
+site/
+
+# Secrets / Credentials
+*.pem
+*.key
+secrets/
+credentials/
