@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Optional
 from dotenv import load_dotenv
 
-
 class ConfigError(Exception):
     """Raised when configuration is invalid or missing."""
     pass

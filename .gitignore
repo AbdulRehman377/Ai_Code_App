@@ -61,3 +61,5 @@ dmypy.json
 # Jupyter
 .ipynb_checkpoints/
 
+# Sandbox Preview
+.preview_registry.json

@@ -1,316 +1,227 @@
 """
 Orchestrator for the code generation pipeline.
+
+Provides wrapper functions for the LangGraph-based workflow.
 """
 
-from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional, Any
 
-from src.schemas import Plan, CodeBundle, GenerationResult, PlanFile
-from src.llm.azure_openai_client import get_azure_client, JSONParseError
-
-
-def _load_prompt(filename: str) -> str:
-    """Load a prompt template from the prompts directory."""
-    prompt_path = Path(__file__).parent / "prompts" / filename
-    return prompt_path.read_text(encoding="utf-8")
+from src.schemas import Plan, CodeBundle, ChatTurn
+from src.state import GraphState, create_initial_state
+from src.graph import get_graph
 
 
-def generate_plan(
-    user_query: str,
-    language_pref: str,
-    framework_pref: Optional[str],
-    executable: bool,
-) -> Plan:
+# =============================================================================
+# GRAPH-BASED ORCHESTRATION
+# =============================================================================
+
+def run_graph(
+    user_input: str,
+    language_pref: str = "Auto",
+    framework_pref: Optional[str] = None,
+    executable: bool = True,
+    chat_history: Optional[List[ChatTurn]] = None,
+    existing_plan: Optional[Plan] = None,
+    existing_codebundle: Optional[CodeBundle] = None,
+    regen_file_path: Optional[str] = None,
+    regen_instructions: Optional[str] = None,
+    force_intent: Optional[str] = None,
+) -> GraphState:
     """
-    Generate a project plan from the user's query.
+    Run the LangGraph workflow with the given inputs.
+    
+    This is the main entry point for the graph-based orchestration.
     
     Args:
-        user_query: The user's description of what they want to build
-        language_pref: Preferred programming language ("Auto" for automatic selection)
+        user_input: The user's input message
+        language_pref: Preferred programming language
         framework_pref: Optional preferred framework
-        executable: Whether the project should be executable
+        executable: Whether to generate an executable project
+        chat_history: Previous conversation history
+        existing_plan: Existing plan (for regeneration)
+        existing_codebundle: Existing code bundle (for regeneration)
+        regen_file_path: Path of file to regenerate
+        regen_instructions: Instructions for regeneration
+        force_intent: Force a specific intent (skip intent router)
         
     Returns:
-        A validated Plan object
-        
-    Raises:
-        JSONParseError: If the LLM response cannot be parsed
-        ValidationError: If the parsed JSON doesn't match the Plan schema
+        The final GraphState with results
     """
-    client = get_azure_client()
-    system_prompt = _load_prompt("plan_system.txt")
+    # Create initial state
+    initial_state = create_initial_state(
+        user_input=user_input,
+        language_pref=language_pref,
+        framework_pref=framework_pref,
+        executable=executable,
+        chat_history=chat_history,
+        plan=existing_plan,
+        codebundle=existing_codebundle,
+        regen_file_path=regen_file_path,
+        regen_instructions=regen_instructions,
+    )
     
-    # Build user prompt with preferences
-    user_prompt_parts = [
-        f"User Request: {user_query}",
-        "",
-        "Preferences:",
-    ]
+    # If forcing intent, set it directly
+    if force_intent:
+        initial_state["intent"] = force_intent
     
-    if language_pref != "Auto":
-        user_prompt_parts.append(f"- Language: {language_pref}")
-    else:
-        user_prompt_parts.append("- Language: Choose the most appropriate language for this task")
+    # Get the compiled graph
+    graph = get_graph()
     
-    if framework_pref:
-        user_prompt_parts.append(f"- Framework: {framework_pref}")
-    else:
-        user_prompt_parts.append("- Framework: Choose if appropriate, or use none")
+    # Run the graph
+    final_state = graph.invoke(initial_state)
     
-    user_prompt_parts.append(f"- Should be executable: {executable}")
-    
-    user_prompt = "\n".join(user_prompt_parts)
-    
-    # Call LLM
-    response_dict = client.invoke_json(system_prompt, user_prompt)
-    
-    # Validate against schema
-    plan = Plan.model_validate(response_dict)
-    
-    return plan
+    return final_state
 
 
-def generate_code(
-    user_query: str,
-    plan: Plan,
-) -> CodeBundle:
+def run_chat(
+    user_input: str,
+    chat_history: Optional[List[ChatTurn]] = None,
+    existing_plan: Optional[Plan] = None,
+    existing_codebundle: Optional[CodeBundle] = None,
+) -> Dict[str, Any]:
     """
-    Generate code files based on the plan.
+    Run a chat interaction.
     
     Args:
-        user_query: The original user query
-        plan: The validated project plan
+        user_input: The user's message
+        chat_history: Previous conversation
+        existing_plan: Current plan context
+        existing_codebundle: Current code context
         
     Returns:
-        A CodeBundle containing all generated files
-        
-    Raises:
-        JSONParseError: If the LLM response cannot be parsed
-        ValidationError: If the parsed JSON doesn't match the CodeBundle schema
+        Dict with 'response' and 'chat_history'
     """
-    client = get_azure_client()
-    system_prompt = _load_prompt("code_system.txt")
+    result = run_graph(
+        user_input=user_input,
+        chat_history=chat_history,
+        existing_plan=existing_plan,
+        existing_codebundle=existing_codebundle,
+        force_intent="chat",
+    )
     
-    # Build user prompt with plan details
-    user_prompt_parts = [
-        "## Original User Request",
-        user_query,
-        "",
-        "## Project Plan",
-        f"Language: {plan.language}",
-        f"Framework: {plan.framework or 'None'}",
-        f"Executable: {plan.executable}",
-        "",
-        "### Summary",
-        plan.summary,
-        "",
-        "### Files to Generate",
-    ]
-    
-    for f in plan.files:
-        user_prompt_parts.append(f"- {f.path}: {f.purpose}")
-    
-    user_prompt_parts.extend([
-        "",
-        "### Dependencies",
-    ])
-    
-    for dep in plan.dependencies:
-        user_prompt_parts.append(f"- {dep}")
-    
-    user_prompt_parts.extend([
-        "",
-        "### Run Steps",
-    ])
-    
-    for i, step in enumerate(plan.steps, 1):
-        user_prompt_parts.append(f"{i}. {step}")
-    
-    user_prompt_parts.extend([
-        "",
-        "Now generate all the code files. Remember to return STRICT JSON only.",
-    ])
-    
-    user_prompt = "\n".join(user_prompt_parts)
-    
-    # Call LLM
-    response_dict = client.invoke_json(system_prompt, user_prompt)
-    
-    # Validate against schema
-    code_bundle = CodeBundle.model_validate(response_dict)
-    
-    # Ensure essential files are present
-    code_bundle = _ensure_essential_files(code_bundle, plan)
-    
-    return code_bundle
-
-
-def _ensure_essential_files(code_bundle: CodeBundle, plan: Plan) -> CodeBundle:
-    """Ensure README.md and .gitignore are present in the code bundle."""
-    files = dict(code_bundle.files)
-    
-    # Check for README.md (case-insensitive)
-    has_readme = any(f.lower() == "readme.md" for f in files.keys())
-    if not has_readme:
-        files["README.md"] = _generate_default_readme(plan)
-    
-    # Check for .gitignore
-    if ".gitignore" not in files:
-        files[".gitignore"] = _generate_default_gitignore(plan.language)
-    
-    return CodeBundle(files=files, notes=code_bundle.notes)
-
-
-def _generate_default_readme(plan: Plan) -> str:
-    """Generate a default README.md if the LLM didn't provide one."""
-    lines = [
-        f"# {plan.summary.split('.')[0]}",
-        "",
-        plan.summary,
-        "",
-        "## Technology",
-        "",
-        f"- Language: {plan.language}",
-    ]
-    
-    if plan.framework:
-        lines.append(f"- Framework: {plan.framework}")
-    
-    if plan.dependencies:
-        lines.extend([
-            "",
-            "## Dependencies",
-            "",
-        ])
-        for dep in plan.dependencies:
-            lines.append(f"- {dep}")
-    
-    if plan.steps:
-        lines.extend([
-            "",
-            "## How to Run",
-            "",
-        ])
-        for i, step in enumerate(plan.steps, 1):
-            lines.append(f"{i}. `{step}`")
-    
-    lines.append("")
-    return "\n".join(lines)
-
-
-def _generate_default_gitignore(language: str) -> str:
-    """Generate a default .gitignore based on language."""
-    common = [
-        "# IDE",
-        ".idea/",
-        ".vscode/",
-        "*.swp",
-        "*.swo",
-        ".DS_Store",
-        "",
-    ]
-    
-    language_specific = {
-        "Python": [
-            "# Python",
-            "__pycache__/",
-            "*.py[cod]",
-            "*$py.class",
-            ".env",
-            ".venv/",
-            "venv/",
-            "env/",
-            "*.egg-info/",
-            "dist/",
-            "build/",
-        ],
-        "JavaScript": [
-            "# Node.js",
-            "node_modules/",
-            "npm-debug.log",
-            ".env",
-            "dist/",
-            "build/",
-        ],
-        "TypeScript": [
-            "# Node.js / TypeScript",
-            "node_modules/",
-            "npm-debug.log",
-            ".env",
-            "dist/",
-            "build/",
-            "*.js",
-            "*.d.ts",
-            "*.js.map",
-        ],
-        "Go": [
-            "# Go",
-            "*.exe",
-            "*.exe~",
-            "*.dll",
-            "*.so",
-            "*.dylib",
-            "*.test",
-            "*.out",
-            "vendor/",
-        ],
-        "Java": [
-            "# Java",
-            "*.class",
-            "*.jar",
-            "*.war",
-            "*.ear",
-            "target/",
-            ".gradle/",
-            "build/",
-        ],
-        "Rust": [
-            "# Rust",
-            "target/",
-            "Cargo.lock",
-            "**/*.rs.bk",
-        ],
-        "C#": [
-            "# C#",
-            "bin/",
-            "obj/",
-            "*.dll",
-            "*.exe",
-            "*.pdb",
-            ".vs/",
-        ],
+    return {
+        "response": result.get("final_chat_response", ""),
+        "chat_history": result.get("chat_history", []),
+        "errors": result.get("errors", []),
     }
-    
-    specific = language_specific.get(language, language_specific["Python"])
-    
-    return "\n".join(common + specific + [""])
 
 
-def generate_project(
-    user_query: str,
-    language_pref: str,
-    framework_pref: Optional[str],
-    executable: bool,
-) -> GenerationResult:
+def run_build(
+    user_input: str,
+    language_pref: str = "Auto",
+    framework_pref: Optional[str] = None,
+    executable: bool = True,
+    chat_history: Optional[List[ChatTurn]] = None,
+) -> Dict[str, Any]:
     """
-    Generate a complete project from a user query.
-    
-    This is the main entry point for the generation pipeline.
+    Run a build operation.
     
     Args:
-        user_query: The user's description of what they want to build
-        language_pref: Preferred programming language ("Auto" for automatic selection)
-        framework_pref: Optional preferred framework
-        executable: Whether the project should be executable
+        user_input: The build request
+        language_pref: Preferred language
+        framework_pref: Preferred framework
+        executable: Whether project should be executable
+        chat_history: Previous conversation
         
     Returns:
-        A GenerationResult containing both the plan and generated code
+        Dict with 'plan', 'codebundle', 'chat_history', 'errors'
     """
-    # Step 1: Generate plan
-    plan = generate_plan(user_query, language_pref, framework_pref, executable)
+    result = run_graph(
+        user_input=user_input,
+        language_pref=language_pref,
+        framework_pref=framework_pref,
+        executable=executable,
+        chat_history=chat_history,
+        force_intent="build",
+    )
     
-    # Step 2: Generate code based on plan
-    code = generate_code(user_query, plan)
+    return {
+        "plan": result.get("plan"),
+        "codebundle": result.get("codebundle"),
+        "chat_history": result.get("chat_history", []),
+        "errors": result.get("errors", []),
+    }
+
+
+def run_regen_file(
+    file_path: str,
+    instructions: str,
+    existing_plan: Plan,
+    existing_codebundle: CodeBundle,
+    chat_history: Optional[List[ChatTurn]] = None,
+) -> Dict[str, Any]:
+    """
+    Regenerate a single file.
     
-    return GenerationResult(plan=plan, code=code)
+    Args:
+        file_path: Path of file to regenerate
+        instructions: User's regeneration instructions
+        existing_plan: The current plan
+        existing_codebundle: The current code bundle
+        chat_history: Previous conversation
+        
+    Returns:
+        Dict with updated 'codebundle', 'chat_history', 'errors'
+    """
+    result = run_graph(
+        user_input=f"Regenerate {file_path}",
+        chat_history=chat_history,
+        existing_plan=existing_plan,
+        existing_codebundle=existing_codebundle,
+        regen_file_path=file_path,
+        regen_instructions=instructions,
+        force_intent="regen_file",
+    )
+    
+    return {
+        "codebundle": result.get("codebundle"),
+        "chat_history": result.get("chat_history", []),
+        "errors": result.get("errors", []),
+    }
+
+
+def run_auto(
+    user_input: str,
+    language_pref: str = "Auto",
+    framework_pref: Optional[str] = None,
+    executable: bool = True,
+    chat_history: Optional[List[ChatTurn]] = None,
+    existing_plan: Optional[Plan] = None,
+    existing_codebundle: Optional[CodeBundle] = None,
+) -> Dict[str, Any]:
+    """
+    Run with automatic intent detection.
+    
+    Args:
+        user_input: The user's message
+        language_pref: Preferred language (for builds)
+        framework_pref: Preferred framework (for builds)
+        executable: Whether builds should be executable
+        chat_history: Previous conversation
+        existing_plan: Current plan context
+        existing_codebundle: Current code context
+        
+    Returns:
+        Dict with 'intent', 'response', 'plan', 'codebundle', 'chat_history', 'errors'
+    """
+    result = run_graph(
+        user_input=user_input,
+        language_pref=language_pref,
+        framework_pref=framework_pref,
+        executable=executable,
+        chat_history=chat_history,
+        existing_plan=existing_plan,
+        existing_codebundle=existing_codebundle,
+    )
+    
+    return {
+        "intent": result.get("intent"),
+        "intent_reason": result.get("intent_reason"),
+        "response": result.get("final_chat_response"),
+        "plan": result.get("plan"),
+        "codebundle": result.get("codebundle"),
+        "chat_history": result.get("chat_history", []),
+        "errors": result.get("errors", []),
+    }
+
 

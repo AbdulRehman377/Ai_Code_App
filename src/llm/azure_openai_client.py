@@ -1,10 +1,10 @@
 """
-Azure OpenAI client with robust JSON parsing.
+Azure OpenAI client with robust JSON parsing and retry logic.
 """
 
 import json
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from openai import AzureOpenAI
 
@@ -17,7 +17,7 @@ class JSONParseError(Exception):
 
 
 class AzureOpenAIClient:
-    """Client for Azure OpenAI with JSON output enforcement."""
+    """Client for Azure OpenAI with JSON output enforcement and retry logic."""
     
     def __init__(self):
         config = get_config()
@@ -29,42 +29,110 @@ class AzureOpenAIClient:
         )
         self.deployment = config.azure_openai_deployment_name
     
-    def invoke_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
+    def invoke_json(
+        self, 
+        system_prompt: str, 
+        user_prompt: str,
+        max_retries: int = 2,
+    ) -> Dict[str, Any]:
         """
-        Invoke the model and parse the response as JSON.
+        Invoke the model and parse the response as JSON with retry logic.
         
         Args:
             system_prompt: Instructions for the assistant
             user_prompt: User's request
+            max_retries: Number of retries on JSON parse failure
             
         Returns:
             Parsed JSON as a dictionary
             
         Raises:
-            JSONParseError: If JSON parsing fails after repair attempts
+            JSONParseError: If JSON parsing fails after all retry attempts
         """
-        # Combine prompts into a single user message to avoid content filter issues
-        combined_prompt = f"""Instructions: {system_prompt}
+        last_error = None
+        
+        for attempt in range(max_retries + 1):
+            # Build the prompt
+            if attempt == 0:
+                combined_prompt = f"""Instructions: {system_prompt}
 
 User Request: {user_prompt}
 
-Please respond with valid JSON only."""
+IMPORTANT: Respond with valid JSON only. No markdown, no code fences, no additional text."""
+            else:
+                # Retry prompt with emphasis on JSON
+                combined_prompt = f"""Instructions: {system_prompt}
 
+User Request: {user_prompt}
+
+CRITICAL: Your previous response was invalid JSON. You MUST return ONLY valid JSON.
+Do NOT include any text before or after the JSON.
+Do NOT wrap in markdown code fences.
+Return ONLY the raw JSON object."""
+
+            response = self.client.chat.completions.create(
+                model=self.deployment,
+                messages=[
+                    {"role": "user", "content": combined_prompt}
+                ],
+                temperature=0.7,
+                max_tokens=4096,
+            )
+            
+            content = response.choices[0].message.content
+            
+            if not content:
+                last_error = JSONParseError("Model returned empty content")
+                continue
+            
+            try:
+                return self._parse_json_robust(content)
+            except JSONParseError as e:
+                last_error = e
+                continue
+        
+        # All retries exhausted
+        raise last_error or JSONParseError("Failed to get valid JSON after retries")
+    
+    def invoke_text(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        chat_history: Optional[List[Dict[str, str]]] = None,
+    ) -> str:
+        """
+        Invoke the model for text (non-JSON) response.
+        
+        Args:
+            system_prompt: Instructions for the assistant
+            user_prompt: User's current message
+            chat_history: Optional list of previous messages [{"role": "user/assistant", "content": "..."}]
+            
+        Returns:
+            Text response from the model
+        """
+        messages = [{"role": "system", "content": system_prompt}]
+        
+        # Add chat history if provided
+        if chat_history:
+            for turn in chat_history:
+                messages.append({
+                    "role": turn.get("role", "user"),
+                    "content": turn.get("content", "")
+                })
+        
+        # Add current user message
+        messages.append({"role": "user", "content": user_prompt})
+        
         response = self.client.chat.completions.create(
             model=self.deployment,
-            messages=[
-                {"role": "user", "content": combined_prompt}
-            ],
+            messages=messages,
             temperature=0.7,
-            max_tokens=4096,
+            max_tokens=2048,
         )
         
         content = response.choices[0].message.content
-        
-        if not content:
-            raise JSONParseError("Model returned empty content")
-        
-        return self._parse_json_robust(content)
+        return content or ""
     
     def _parse_json_robust(self, text: str) -> Dict[str, Any]:
         """
